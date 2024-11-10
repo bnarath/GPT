@@ -1,0 +1,33 @@
+[tool.poetry]
+name = "gpt"
+version = "0.1.0"
+description = ""
+authors = ["bnarath <bincybaburajnarath@gmail.com>"]
+readme = "README.md"
+# List all package directories in an array
+packages = [
+    { include = "nano_gpt" },
+]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+requests = "^2.32.3"
+torch = { version = "2.2.2", source="pytorch"}
+
+[[tool.poetry.source]]
+name = 'default'
+url = 'https://pypi.python.org/simple'
+priority = 'primary'
+
+[[tool.poetry.source]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cpu/"
+priority = 'explicit'
+
+
+[tool.poetry.group.dev.dependencies]
+jupyter = "^1.1.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
