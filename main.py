@@ -41,7 +41,7 @@ def _parse_args():
         dest="num_epochs",
         required=False,
         type=int,
-        default=3000,
+        default=5000,
         help="No. of epochs",
     )
     arg_parser.add_argument(
@@ -57,7 +57,7 @@ def _parse_args():
         dest="eval_interval",
         required=False,
         type=int,
-        default=300,
+        default=500,
         help="Epoch interval for evaluation",
     )
     arg_parser.add_argument(
@@ -67,6 +67,30 @@ def _parse_args():
         type=int,
         default=300,
         help="No of batches to consider for train and test evaluation to get mean loss value (to avoid noisy loss)",
+    )
+    arg_parser.add_argument(
+        "--eval_iters",
+        dest="eval_iters",
+        required=False,
+        type=int,
+        default=300,
+        help="No of batches to consider for train and test evaluation to get mean loss value (to avoid noisy loss)",
+    )
+    arg_parser.add_argument(
+        "--embed_size",
+        dest="embed_size",
+        required=False,
+        type=int,
+        default=32,
+        help="Embedding size of each token/char",
+    )
+    arg_parser.add_argument(
+        "--head_size",
+        dest="head_size",
+        required=False,
+        type=int,
+        default=16,
+        help="Attention head size k,v,q last dimension",
     )
     return arg_parser.parse_args()
 
@@ -84,5 +108,7 @@ if __name__ == "__main__":
             max_new_tokens=args.max_new_tokens,
             eval_interval=args.eval_interval,
             eval_iters=args.eval_iters,
+            embed_size=args.embed_size,
+            head_size=args.head_size,
         )
         nano_gpt.run()

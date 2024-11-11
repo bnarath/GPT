@@ -10,7 +10,7 @@ from typing import List, Tuple, Callable
 
 logging.getLogger().setLevel(logging.INFO)
 torch.manual_seed(42)
-
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
 class Nano_GPT:
     """
@@ -28,6 +28,8 @@ class Nano_GPT:
         max_new_tokens: int = 100,
         eval_interval: int = 30,
         eval_iters: int = 20,
+        embed_size: int = 32,
+        head_size: int = 16,
     ):
         self.lr = lr
         self.batch_size = batch_size
@@ -36,7 +38,8 @@ class Nano_GPT:
         self.max_new_tokens = max_new_tokens
         self.eval_interval = eval_interval
         self.eval_iters = eval_iters
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.embed_size = embed_size
+        self.head_size = head_size
 
     def run(self):
         data_retriever = Data_Retriever()
@@ -54,8 +57,13 @@ class Nano_GPT:
         )
         # logging.info("Inspecting a random training batch")
         # self._inspect_a_random_batch(train_data, batch_size=4, block_size=8)
-        self.model = BigramLanguageModel(vocab_size=self.vocab_size)
-        self.model = self.model.to(self.device)
+        self.model = BigramLanguageModel(
+            vocab_size=self.vocab_size,
+            block_size=self.block_size,
+            embed_size=self.embed_size,
+            head_size=self.head_size,
+        )
+        self.model = self.model.to(device)
         # logging.info("Inspecting generation task")
         # self._inspect_generation_task(train_data)
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr)
@@ -147,7 +155,7 @@ class Nano_GPT:
         ix = torch.randint(len(data) - block_size, (batch_size,))
         x = torch.stack([data[i : i + block_size] for i in ix])
         y = torch.stack([data[i + 1 : i + block_size + 1] for i in ix])
-        x, y = x.to(self.device), y.to(self.device)
+        x, y = x.to(device), y.to(device)
         return x, y
 
     def _inspect_a_random_batch(
@@ -185,16 +193,68 @@ class Nano_GPT:
         )
 
 
+class AttentionHead(nn.Module):
+    """Single head of self attention"""
+
+    def __init__(self, block_size: int = 8, embed_size: int = 32, head_size: int = 16):
+        super().__init__()
+        self.block_size = block_size
+        self.embed_size = embed_size
+        self.head_size = head_size
+        self.key = nn.Linear(embed_size, head_size, bias=False)
+        self.query = nn.Linear(embed_size, head_size, bias=False)
+        self.value = nn.Linear(embed_size, head_size, bias=False)
+        self.dropout = nn.Dropout(0.1)
+        self.register_buffer(
+            "tril", torch.tril(torch.ones(block_size, block_size))
+        )  # part of model state but not trainable, no gradients
+
+    def forward(self, x):
+        B, T, C = x.shape  # C is embed_size
+        k = self.key(x)  # B, T, head_size
+        q = self.query(x)  # B, T, head_size
+        # compute attention score weights
+        wei = q @ k.transpose(-2, -1) * self.head_size**-0.5  # B, T, T
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf"))  # B, T, T
+        wei = F.softmax(wei, dim=-1)  # B, T, T
+        wei = self.dropout(wei)
+        # Get weighted aggregation of values
+        v = self.value(x)  # B, T, head_size
+        out = wei @ v  # B, T, head_size
+        return out
+
+
 class BigramLanguageModel(nn.Module):
 
-    def __init__(self, vocab_size):
+    def __init__(
+        self, vocab_size: int, block_size: int, embed_size: int, head_size: int
+    ):
         super().__init__()
-        # Embedding of each tocken represents the logits of the next char
-        self.token_embedding_table = nn.Embedding(vocab_size, vocab_size)
+        self.vocab_size = vocab_size
+        self.block_size = block_size
+        self.embed_size = embed_size
+        self.head_size = head_size
+        # Embedding of each token
+        self.token_embedding_table = nn.Embedding(vocab_size, embed_size)
+        self.sa_head = AttentionHead(block_size, embed_size, head_size=embed_size)
+        self.lm_head = nn.Linear(embed_size, vocab_size)
+        self.pos_embedding_table = nn.Embedding(block_size, embed_size)
 
     def forward(self, idx, targets=None):
-        # idx and targets are (batch, block), logits (batch, block, vocab)
-        logits = self.token_embedding_table(idx)
+        # idx - (batch, block)
+        # token_embeddings - (batch, block, embed_size)
+        # logits - (batch, block, vocab_size)
+        B, T = idx.shape
+        token_embeddings = self.token_embedding_table(idx)  # (batch, block, embed_size)
+        pos_embeddings = self.pos_embedding_table(
+            torch.arange(T, device=device)
+        )  # (block, vocab_size)
+        x = (
+            token_embeddings + pos_embeddings
+        )  # (batch, block, embed_size) - broad casting
+        x = self.sa_head(x)  # batch, block,head_size
+        logits = self.lm_head(x)  # (batch, block, vocab_size)
+
         B, T, C = logits.shape
         _logits = logits.view(B * T, C)
         if targets is None:
@@ -211,12 +271,14 @@ class BigramLanguageModel(nn.Module):
     def generate(self, idx: torch.Tensor, max_new_tokens: int) -> torch.Tensor:
         # idx is (B, T) -> produces (B, T+max_new_tokens)
         for i in range(max_new_tokens):
+            # crop idx to the last block_size of tokens
+            idx_cropped = idx[:, -self.block_size :]
             # get logits
-            logits, _ = self(idx)  # self.forward
+            logits, _ = self(idx_cropped)  # self.forward
             # take only the last time stamp to append
             logits = logits[:, -1, :]  # (B, X, C) to (B, C)
             # apply softmax
-            probs = F.softmax(logits, dim=1)
+            probs = F.softmax(logits, dim=-1)
             idx_next_token = torch.multinomial(probs, num_samples=1)  # (B, 1)
             # append the new with existing
             idx = torch.cat((idx, idx_next_token), dim=1)  # (B, T+1)
